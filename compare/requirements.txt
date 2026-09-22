@@ -1,0 +1,6 @@
+# Extra packages for the Nereus vs Tethys comparison (compare/).
+pandas>=2
+requests>=2.31
+psutil>=5.9
+# Only for compare/mock_tethys.py (testing the harness without Tethys):
+# saxonche>=12.5

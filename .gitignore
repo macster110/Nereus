@@ -1,0 +1,8 @@
+.venv/
+.pgdata/
+.pgsock/
+.pg.log
+bench/data/
+__pycache__/
+.pytest_cache/
+.DS_Store

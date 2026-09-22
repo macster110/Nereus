@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic document exercising every Detections element the PoC maps.
+     Values are made up; it exists only to test the round trip. -->
+<Detections xmlns="http://tethys.sdsu.edu/schema/1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://tethys.sdsu.edu/schema/1.0 tethys.xsd">
+   <Id>TEST_kitchen_sink</Id>
+   <Description>
+      <Objectives>Exercise every mapped element &amp; odd characters: &lt;tag&gt; "quotes" ümlaut</Objectives>
+      <Abstract>Synthetic test document.</Abstract>
+      <Method>Hand written.</Method>
+   </Description>
+   <DataSource>
+      <DeploymentId>TEST_DEP_01</DeploymentId>
+   </DataSource>
+   <Algorithm>
+      <Method>Click train classifier</Method>
+      <Software>PAMGuard</Software>
+      <Version>2.02.14</Version>
+      <Parameters>
+         <Threshold units="dB">12.5</Threshold>
+         <Classifier name="porpoise"><MinICI_ms>2</MinICI_ms><MaxICI_ms>200</MaxICI_ms></Classifier>
+         <!-- PAMGuard writes settings in no namespace; xmlns="" must survive. -->
+         <settings>legacy<MODULE xmlns="" Java.class="whistlesAndMoans.WhistleMoanControl"><PROCESS Name="Noise reduction"/></MODULE></settings>
+      </Parameters>
+      <SupportSoftware>
+         <Software>Raven Pro</Software>
+         <Version>1.6</Version>
+      </SupportSoftware>
+      <SupportSoftware>
+         <Software>Triton</Software>
+      </SupportSoftware>
+   </Algorithm>
+   <QualityAssurance>
+      <Description>
+         <Method>Every detection reviewed by an analyst.</Method>
+      </Description>
+   </QualityAssurance>
+   <UserId>test-user</UserId>
+   <Effort>
+      <Start>2021-06-01T00:00:00Z</Start>
+      <End>2021-06-03T12:00:00.250Z</End>
+      <AnalysisGaps>
+         <Periodic>
+            <Regimen>
+               <TimeStamp>2021-06-01T00:00:00Z</TimeStamp>
+               <AnalysisDuration_s Offfset_s="30">300</AnalysisDuration_s>
+               <AnalysisInterval_s>600</AnalysisInterval_s>
+            </Regimen>
+         </Periodic>
+         <Aperiodic>
+            <Start>2021-06-02T03:00:00Z</Start>
+            <End>2021-06-02T04:30:00Z</End>
+            <Reason>Instrument noise</Reason>
+         </Aperiodic>
+      </AnalysisGaps>
+      <Kind>
+         <SpeciesId Group="NBHF">180473</SpeciesId>
+         <Call>Clicks</Call>
+         <Parameters>
+            <Subtype>Buzz</Subtype>
+            <FrequencyMeasurements_Hz>110000 130000 150000</FrequencyMeasurements_Hz>
+         </Parameters>
+         <Granularity BinSize_min="1" FirstBinStart="2021-06-01T00:00:00Z">binned</Granularity>
+      </Kind>
+      <Kind>
+         <SpeciesId>180404</SpeciesId>
+         <Call>Moan</Call>
+         <Granularity EncounterGap_min="30">encounter</Granularity>
+      </Kind>
+      <Kind>
+         <SpeciesId>180404</SpeciesId>
+         <Granularity>call</Granularity>
+      </Kind>
+   </Effort>
+   <OnEffort>
+      <Detection>
+         <Input_file>20210601_000000.wav</Input_file>
+         <Start>2021-06-01T00:00:12.345678Z</Start>
+         <End>2021-06-01T00:01:30Z</End>
+         <Count>42</Count>
+         <Event>E1</Event>
+         <UnitId>7</UnitId>
+         <Channel>2</Channel>
+         <SpeciesId Group="NBHF">180473</SpeciesId>
+         <Call>Clicks</Call>
+         <Call>Buzz</Call>
+         <Parameters>
+            <Subtype>Buzz</Subtype>
+            <Score>0.93</Score>
+            <Confidence>0.8</Confidence>
+            <QualityAssurance>valid</QualityAssurance>
+            <ReceivedLevel_dB>132.5</ReceivedLevel_dB>
+            <FrequencyMeasurements_dB>101.2 99.8 97.1</FrequencyMeasurements_dB>
+            <SNR_dB>18</SNR_dB>
+            <MinFreq_Hz>115000</MinFreq_Hz>
+            <MaxFreq_Hz>145000</MaxFreq_Hz>
+            <PeakFreq_Hz>131250.5</PeakFreq_Hz>
+            <Peaks_Hz>129000 133000</Peaks_Hz>
+            <Duration_s>0.00012</Duration_s>
+            <Sideband_Hz>120000 142000</Sideband_Hz>
+            <Tonal>
+               <Offset_s>0 0.01 0.02</Offset_s>
+               <Hz>130000 131000 132000</Hz>
+               <dB>98 99 97.5</dB>
+            </Tonal>
+            <EventRef>E0</EventRef>
+            <EventRef>E2</EventRef>
+            <UserDefined>
+               <ClickTrainId>1234</ClickTrainId>
+               <ICI_ms mode="median">35.2</ICI_ms>
+            </UserDefined>
+         </Parameters>
+         <Image>spectrogram_E1.png</Image>
+         <Audio>clip_E1.flac</Audio>
+         <Comment>First detection, with a comment containing &lt;markup&gt;.</Comment>
+      </Detection>
+      <Detection>
+         <Start>2021-06-01T05:00:00-07:00</Start>
+         <SpeciesId>180404</SpeciesId>
+         <Call>Moan</Call>
+      </Detection>
+      <Detection>
+         <Start>2021-06-02T23:59:30Z</Start>
+         <End>2021-06-03T00:00:45Z</End>
+         <SpeciesId>180404</SpeciesId>
+         <Parameters>
+            <Score>-3.5e-2</Score>
+         </Parameters>
+      </Detection>
+   </OnEffort>
+   <OffEffort>
+      <Detection>
+         <Start>2021-06-01T01:00:00Z</Start>
+         <SpeciesId>180530</SpeciesId>
+         <Call></Call>
+         <Comment>Seen while reviewing, not a target species.</Comment>
+      </Detection>
+   </OffEffort>
+   <BespokeData>
+      <Abstract>Links to the PAMGuard outputs used.</Abstract>
+      <Data>
+         <URI>s3://example-bucket/test/pamguard_binary.zip</URI>
+         <Comment>PAMGuard binary files</Comment>
+      </Data>
+   </BespokeData>
+   <MetadataInfo>
+      <Contact>
+         <individualName>Test Person</individualName>
+      </Contact>
+      <Date>2021-07-01T00:00:00Z</Date>
+      <UpdateFrequency>as-needed</UpdateFrequency>
+   </MetadataInfo>
+</Detections>
