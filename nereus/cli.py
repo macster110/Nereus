@@ -59,6 +59,7 @@ def main(argv=None):
     a = ap.parse_args(argv)
     schema = load_schema(a.xsd) if getattr(a, "xsd", None) else None
 
+    status = 0
     with connect() as conn:
         if a.cmd == "ingest":
             for f in a.files:
@@ -74,12 +75,13 @@ def main(argv=None):
             bad = 0
             for f in a.files:
                 info, diffs = roundtrip(conn, Path(f), schema)
-                status = "LOSSLESS" if not diffs else f"{len(diffs)} DIFFERENCES"
-                print(f"{Path(f).name}: {info['detections']} detections -> {status}")
+                verdict = "LOSSLESS" if not diffs else f"{len(diffs)} DIFFERENCES"
+                print(f"{Path(f).name}: {info['detections']} detections -> {verdict}")
                 for d in diffs:
                     print("   ", d)
                 bad += bool(diffs)
-            sys.exit(1 if bad else 0)
+            status = 1 if bad else 0
+    sys.exit(status)  # outside the with-block, so the connection commits first
 
 
 if __name__ == "__main__":

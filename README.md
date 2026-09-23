@@ -70,34 +70,54 @@ Tethys install's `databases/<db>/lib/schema/tethys.xsd`. With it set,
 | `sql/examples/write_detections.sql` | The same writes as raw SQL, as a JDBC writer would send them |
 | `nereus/ingest.py` | Tethys XML import: streaming parser, COPY into Postgres, strict about unknown elements |
 | `nereus/export.py` | Rows back to ASA XML in schema element order, streamed |
+| `nereus/xmljson.py` | XML blocks ↔ searchable JSON (jsonb), exact in both directions |
 | `nereus/canonical.py` | "Same information?" comparison used by the round-trip check (streaming) |
 | `nereus/deployment.py` | Minimal Deployment import: id, position, times |
-| `tests/` | Round-trip, column, summary and rejection tests |
+| `tests/` | Round-trip, JSON search, writer, summary and rejection tests |
 | `bench/` | Synthetic data generator and benchmark |
 | `compare/` | Nereus (SQL) vs Tethys (XML) read and write speed test, run on Windows ([README](compare/README.md)) |
 | `scripts/` | Local PostgreSQL cluster: `pg.sh` (macOS/Linux), `pg.ps1` (Windows) |
 | `data/examples/` | The two Nilus example documents from Tethys 3.2 |
 
-## How the XML maps to tables
+## What goes in tables, and what goes in JSON
 
 | ASA element | Stored as |
 |---|---|
-| `Detections` (Id, DataSource, Algorithm, UserId, Effort Start/End) | `detection_set` columns |
+| `Detections` header (Id, DataSource, Algorithm method/software/version, UserId, Effort Start/End) | `detection_set` columns |
 | `Effort/Kind` (species, call, granularity + attributes) | `effort_kind` rows |
 | `Effort/AnalysisGaps` | `analysis_gap_periodic`, `analysis_gap_aperiodic` rows |
-| `Detection` and every scalar in `Detection/Parameters` | `detection` columns (lists become `float8[]`) |
-| `Description`, `QualityAssurance`, `BespokeData`, `MetadataInfo`, `Algorithm/Parameters`, `UserDefined` | Exact XML fragment in a text column |
-| (derived) | `summary_daily`: detection-positive minutes per UTC day with effort minutes, filled at ingest |
+| `Detection` and every scalar in `Detection/Parameters` | `detection` columns; contours and other number lists are `float8[]` |
+| `Algorithm/Parameters`, `SupportSoftware`, `Description`, `QualityAssurance`, `BespokeData`, `MetadataInfo` | `jsonb` columns on `detection_set` |
+| `Detection/Parameters/UserDefined` | `detection.user_defined` (`jsonb`) |
+| (derived) | `summary_daily`: detection-positive minutes per UTC day with effort minutes, filled on write |
 
-Principles:
+The rule:
 
-* **Filterable means a column.** Species, times, frequencies, scores, channel
-  and granularity are typed and indexed.
-* **Descriptive or free-form means verbatim.** These blocks are rarely queried
-  and in some cases are `xs:any`, so the fragment is kept byte for byte.
+* **A table** for anything people filter, join or aggregate on, and for any
+  list of uniform records that can grow large. Fixed structs are flattened into
+  columns.
+* **`jsonb`** for descriptive blocks and for lists of complicated or free-form
+  structs that are read as a unit. It's still searchable:
+
+  ```sql
+  SELECT doc_id FROM nereus.detection_set
+  WHERE algorithm_parameters @> '{"Classifier": {"@name": "porpoise"}}';
+
+  SELECT t_start, (user_defined->>'ICI_ms')::float FROM nereus.detection
+  WHERE user_defined ? 'ICI_ms';
+  ```
+
+  The XML ↔ JSON mapping (`nereus/xmljson.py`) is plain (`<MinICI_ms>2</MinICI_ms>`
+  becomes `{"MinICI_ms": 2}`, attributes are `"@name"`, repeated elements are
+  arrays), plus bookkeeping keys (`#order`, `#ns`, `#text`) that make it exact.
+  Queries can ignore those.
 * **Unknown means fail.** Any element the importer can't place raises
   `UnmappedElement` and the whole import rolls back, so data can never be
   dropped silently.
+* **Exact, or keep the original.** Each block is converted to JSON and back
+  on import and compared. The one case JSON can't hold (text *between* child
+  elements) is kept as the original XML as well (`exact_xml`,
+  `user_defined_xml`), and export uses it. Otherwise those columns are NULL.
 
 ### What "lossless" means here
 
@@ -138,5 +158,7 @@ comparison does catch a real change.
   `Effort/IntensityReference_uPa` can never validate. Worth reporting to the
   Tethys team.
 * **PAMGuard settings in `Algorithm/Parameters` use `xmlns=""`** (elements with
-  no namespace inside the Tethys namespace). That's valid XML, but it's easy to
-  lose: lxml's `cleanup_namespaces` drops it. Nereus keeps it, with a test.
+  no namespace inside the Tethys namespace) and mix text with elements. That's
+  valid XML, but it's easy to lose: lxml's `cleanup_namespaces` drops the
+  `xmlns=""`, and so does lxml when *building* such elements. Nereus records it
+  in the JSON (`"#ns": ""`) and writes it back explicitly, with tests.

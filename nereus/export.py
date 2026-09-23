@@ -11,6 +11,7 @@ from xml.sax.saxutils import escape, quoteattr
 import psycopg
 
 from .asa import format_time, format_num
+from .xmljson import block_to_xml
 
 XSI = "http://www.w3.org/2001/XMLSchema-instance"
 IND = "   "  # Tethys indents with three spaces
@@ -35,6 +36,15 @@ def _frag(xml: str | None, depth: int) -> str:
     return "" if xml is None else f"{IND * depth}{xml}\n"
 
 
+def _block(name: str, value, exact: str | None, ns: str | None, depth: int) -> str:
+    """A jsonb block as XML; the original XML wins when one was kept."""
+    if exact is not None:
+        return _frag(exact, depth)
+    if value is None:
+        return ""
+    return _frag(block_to_xml(name, value, ns), depth)
+
+
 def _species(tsn, group, depth):
     return _el("SpeciesId", tsn, depth, {"Group": group})
 
@@ -49,7 +59,7 @@ _DETECTION_SELECT = "SELECT " + ", ".join(
     ["d.*"] + [f"array_to_string({c}, ' ') AS {c}" for c in _ARRAYS]) + " FROM nereus.detection d"
 
 
-def _detection(r: dict) -> str:
+def _detection(r: dict, ns: str | None = None) -> str:
     d = 3
     out = [f"{IND * 2}<Detection>\n",
            _opt("Input_file", r["input_file"], d),
@@ -86,7 +96,7 @@ def _detection(r: dict) -> str:
                     f"{IND * p}</Tonal>\n"]
         for e in r["event_ref"] or []:
             out.append(_el("EventRef", e, p))
-        out.append(_frag(r["user_defined_xml"], p))
+        out.append(_block("UserDefined", r["user_defined"], r["user_defined_xml"], ns, p))
         out.append(f"{IND * d}</Parameters>\n")
     out += [_opt("Image", r["image"], d),
             _opt("Audio", r["audio"], d),
@@ -147,7 +157,16 @@ def _effort(cur, s: dict) -> str:
 
 def export(conn: psycopg.Connection, doc_id: str, out) -> int:
     """Write the Detections document `doc_id` to text stream `out`.
-    Returns the number of detections written."""
+    Returns the number of detections written.
+
+    Runs in its own transaction block: the server-side cursors used for
+    streaming need one, and without this they would leave an implicit
+    transaction open that swallowed the caller's later writes."""
+    with conn.transaction():
+        return _export(conn, doc_id, out)
+
+
+def _export(conn: psycopg.Connection, doc_id: str, out) -> int:
     with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
         cur.execute("SELECT * FROM nereus.detection_set WHERE doc_id = %s", (doc_id,))
         s = cur.fetchone()
@@ -170,7 +189,9 @@ def export(conn: psycopg.Connection, doc_id: str, out) -> int:
         out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         out.write(f"<Detections{''.join(root_attr)}{nsdecl}>\n")
         out.write(_el("Id", s["doc_id"], 1))
-        out.write(_frag(s["description_xml"], 1))
+        exact = s["exact_xml"] or {}
+        blk = lambda name, col, depth, key=None: _block(name, s[col], exact.get(key or name), ns, depth)
+        out.write(blk("Description", "description", 1))
         out.write(f"{IND}<DataSource>\n")
         out.write(_opt("EnsembleId", s["ensemble_ref"], 2))
         out.write(_opt("DeploymentId", s["deployment_ref"], 2))
@@ -179,11 +200,15 @@ def export(conn: psycopg.Connection, doc_id: str, out) -> int:
         out.write(_opt("Method", s["algorithm_method"], 2))
         out.write(_opt("Software", s["algorithm_software"], 2))
         out.write(_opt("Version", s["algorithm_version"], 2))
-        out.write(_frag(s["algorithm_params_xml"], 2))
-        for f in s["algorithm_support_xml"] or []:
-            out.write(_frag(f, 2))
+        out.write(blk("Parameters", "algorithm_parameters", 2, "Algorithm/Parameters"))
+        if "Algorithm/SupportSoftware" in exact:
+            for f in exact["Algorithm/SupportSoftware"]:
+                out.write(_frag(f, 2))
+        else:
+            for v in s["algorithm_support"] or []:
+                out.write(_block("SupportSoftware", v, None, ns, 2))
         out.write(f"{IND}</Algorithm>\n")
-        out.write(_frag(s["quality_assurance_xml"], 1))
+        out.write(blk("QualityAssurance", "quality_assurance", 1))
         out.write(_opt("UserId", s["user_id"], 1))
         out.write(_effort(cur, s))
         set_id = s["id"]
@@ -198,11 +223,11 @@ def export(conn: psycopg.Connection, doc_id: str, out) -> int:
             cur.execute(_DETECTION_SELECT + " WHERE set_id = %s AND on_effort = %s "
                         "ORDER BY ord", (set_id, flag))
             for r in cur:
-                out.write(_detection(r))
+                out.write(_detection(r, ns))
                 n += 1
         out.write(f"{IND}</{group}>\n")
 
-    out.write(_frag(s["bespoke_data_xml"], 1))
-    out.write(_frag(s["metadata_info_xml"], 1))
+    out.write(blk("BespokeData", "bespoke_data", 1))
+    out.write(blk("MetadataInfo", "metadata_info", 1))
     out.write("</Detections>\n")
     return n

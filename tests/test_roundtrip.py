@@ -40,6 +40,17 @@ def test_lossless(conn, path):
     assert diffs == []
 
 
+def test_export_does_not_swallow_later_writes(conn):
+    """Regression: export's streaming cursors used to leave a transaction open,
+    so imports after an export were silently lost when the connection closed."""
+    roundtrip(conn, EXAMPLES[0])
+    roundtrip(conn, EXAMPLES[1])
+    with psycopg.connect(DSN) as other:  # a separate session sees only committed data
+        n = other.execute("SELECT count(*) FROM nereus.detection_set WHERE doc_id = ANY(%s)",
+                          ([p.stem for p in EXAMPLES],)).fetchone()[0]
+    assert n == 2
+
+
 def test_example_counts(conn):
     """Detection and effort counts in SQL match the XML."""
     expected = {"CSM01A_automatic_UBW_jst": (569, 1), "SOCAL_U_01_automatic_UBW_jst": (334, 2)}
@@ -58,7 +69,7 @@ def test_kitchen_sink_columns(conn):
     ingest(conn, str(KITCHEN), replace=True)
     r = conn.execute("""
         SELECT d.calls, d.score, d.peaks_hz, d.tonal_hz, d.event_ref, d.t_start,
-               d.user_defined_xml LIKE '%%ClickTrainId%%'
+               (d.user_defined->>'ClickTrainId')::int = 1234
         FROM nereus.detection d JOIN nereus.detection_set s ON s.id = d.set_id
         WHERE s.doc_id = 'TEST_kitchen_sink' AND d.ord = 0""").fetchone()
     calls, score, peaks, tonal_hz, refs, t_start, has_ud = r
@@ -75,6 +86,42 @@ def test_kitchen_sink_columns(conn):
         JOIN nereus.detection_set s ON s.id = d.set_id
         WHERE s.doc_id = 'TEST_kitchen_sink' AND d.ord = 1""").fetchone()[0]
     assert (t.hour, t.minute) == (12, 0)
+
+
+def test_json_blocks_are_searchable(conn):
+    """Free-form blocks are jsonb that SQL can search, not opaque XML."""
+    ingest(conn, str(KITCHEN), replace=True)
+    row = conn.execute("""
+        SELECT s.algorithm_parameters @> '{"Classifier": {"@name": "porpoise"}}',
+               (s.algorithm_parameters->'Threshold'->>'#text')::float,
+               s.algorithm_parameters->'settings'->'MODULE'->>'#ns',
+               s.description->>'Abstract',
+               s.metadata_info->'Contact'->>'individualName',
+               jsonb_array_length(s.algorithm_support),
+               s.bespoke_data->'Data'->>'URI',
+               s.exact_xml,
+               (SELECT count(*) FROM nereus.detection d
+                WHERE d.set_id = s.id AND d.user_defined @> '{"ICI_ms": {"@mode": "median"}}'),
+               (SELECT count(*) FROM nereus.detection d
+                WHERE d.set_id = s.id AND d.user_defined_xml IS NOT NULL)
+        FROM nereus.detection_set s WHERE s.doc_id = 'TEST_kitchen_sink'""").fetchone()
+    assert row == (True, 12.5, "", "Synthetic test document.", "Test Person", 2,
+                   "s3://example-bucket/test/pamguard_binary.zip", None, 1, 0)
+
+
+def test_block_json_cannot_hold_keeps_original_xml(conn, tmp_path):
+    """Text between child elements has no JSON form: the original XML is kept
+    as well, and the export is still lossless."""
+    xml = KITCHEN.read_text().replace(
+        "<ClickTrainId>1234</ClickTrainId>", "<ClickTrainId>1234</ClickTrainId>stray text")
+    src = tmp_path / "mixed.xml"
+    src.write_text(xml)
+    info, diffs = roundtrip(conn, src)
+    assert diffs == []
+    ud_json, ud_xml = conn.execute(
+        "SELECT user_defined, user_defined_xml FROM nereus.detection "
+        "WHERE set_id = %s AND ord = 0", (info["set_id"],)).fetchone()
+    assert ud_json is None and "stray text" in ud_xml
 
 
 def test_summary_counts_minutes(conn):

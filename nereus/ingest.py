@@ -8,14 +8,16 @@ the import fails loudly rather than silently dropping data, which is what
 makes the XML -> SQL -> XML round trip trustworthy.
 """
 
-import copy
 import json
 from contextlib import ExitStack
 
 from lxml import etree
 import psycopg
 
+from psycopg.types.json import Jsonb
+
 from .asa import local, text, parse_time, num_list
+from .xmljson import convert, original_xml
 
 
 class UnmappedElement(ValueError):
@@ -32,16 +34,6 @@ def pg_float_array(s: str | None) -> str | None:
     return "{" + ",".join(s.split()) + "}"
 
 
-def frag(el) -> str:
-    """Exact XML fragment for blocks stored verbatim. deepcopy keeps only the
-    namespace declarations the fragment uses. (Not etree.cleanup_namespaces:
-    it also deletes xmlns="" undeclarations, silently moving no-namespace
-    elements, as PAMGuard writes, into the Tethys namespace.)"""
-    el = copy.deepcopy(el)
-    el.tail = None
-    return etree.tostring(el, encoding="unicode")
-
-
 DETECTION_COLS = [
     "set_id", "ord", "on_effort", "t_start", "t_end", "input_file", "count",
     "event", "unit_id", "channel", "species_tsn", "species_group", "calls",
@@ -49,7 +41,7 @@ DETECTION_COLS = [
     "received_level_db", "freq_measurements_db", "snr_db", "min_freq_hz",
     "max_freq_hz", "peak_freq_hz", "peaks_hz", "duration_s", "sideband_hz",
     "tonal_offset_s", "tonal_hz", "tonal_db", "has_tonal", "event_ref",
-    "user_defined_xml", "image", "audio", "comment",
+    "user_defined", "user_defined_xml", "image", "audio", "comment",
 ]
 
 # Detection/Parameters scalar children -> (column, converter)
@@ -121,7 +113,9 @@ def detection_row(el, set_id: int, ord_: int, on_effort: bool) -> tuple:
                 elif pn == "EventRef":
                     refs.append(text(p))
                 elif pn == "UserDefined":
-                    r["user_defined_xml"] = frag(p)
+                    ud, xml = convert(p, etree.QName(c).namespace)
+                    r["user_defined"] = None if ud is None else json.dumps(ud)
+                    r["user_defined_xml"] = xml
                 else:
                     raise UnmappedElement(f"Detection/Parameters/{pn}")
             r["event_ref"] = refs or None
@@ -202,27 +196,32 @@ def _parse_effort(el) -> dict:
 class _Header:
     """Document-level fields gathered before and after the detections."""
 
+    # element name -> detection_set jsonb column
+    BLOCKS = {"Description": "description", "QualityAssurance": "quality_assurance",
+              "BespokeData": "bespoke_data", "MetadataInfo": "metadata_info"}
+
     def __init__(self):
-        self.v = {"description_xml": None, "quality_assurance_xml": None,
-                  "bespoke_data_xml": None, "metadata_info_xml": None,
+        self.v = {"description": None, "quality_assurance": None,
+                  "bespoke_data": None, "metadata_info": None,
                   "algorithm_method": None, "algorithm_software": None,
-                  "algorithm_version": None, "algorithm_params_xml": None,
-                  "algorithm_support_xml": None, "deployment_ref": None,
+                  "algorithm_version": None, "algorithm_parameters": None,
+                  "algorithm_support": None, "deployment_ref": None,
                   "ensemble_ref": None, "user_id": None}
+        self.exact_xml = {}  # blocks JSON can't hold exactly: name -> original XML
         self.effort = None
+
+    def _json(self, key: str, el):
+        value, xml = convert(el, etree.QName(el.getparent()).namespace)
+        if xml is not None:
+            self.exact_xml[key] = xml
+        return value
 
     def take(self, el):
         n = local(el.tag)
         if n == "Id":
             self.v["doc_id"] = el.text.strip()
-        elif n == "Description":
-            self.v["description_xml"] = frag(el)
-        elif n == "QualityAssurance":
-            self.v["quality_assurance_xml"] = frag(el)
-        elif n == "BespokeData":
-            self.v["bespoke_data_xml"] = frag(el)
-        elif n == "MetadataInfo":
-            self.v["metadata_info_xml"] = frag(el)
+        elif n in self.BLOCKS:
+            self.v[self.BLOCKS[n]] = self._json(n, el)
         elif n == "UserId":
             self.v["user_id"] = text(el)
         elif n == "DataSource":
@@ -245,16 +244,24 @@ class _Header:
                 elif cn == "Version":
                     self.v["algorithm_version"] = text(c)
                 elif cn == "Parameters":
-                    self.v["algorithm_params_xml"] = frag(c)
+                    self.v["algorithm_parameters"] = self._json("Algorithm/Parameters", c)
                 elif cn == "SupportSoftware":
-                    support.append(frag(c))
+                    support.append(c)
                 else:
                     raise UnmappedElement(f"Algorithm/{cn}")
-            self.v["algorithm_support_xml"] = support or None
+            if support:
+                values, xmls = zip(*(convert(c, etree.QName(el).namespace) for c in support))
+                self.v["algorithm_support"] = list(values)
+                if any(x is not None for x in xmls):  # keep all of them together
+                    self.exact_xml["Algorithm/SupportSoftware"] = [original_xml(c) for c in support]
         elif n == "Effort":
             self.effort = _parse_effort(el)
         else:
             raise UnmappedElement(f"Detections/{n}")
+
+    def jsonb(self, key):
+        v = self.v[key]
+        return None if v is None else Jsonb(v)
 
 
 def _ensure_deployment(cur, ref: str | None) -> int | None:
@@ -269,6 +276,10 @@ def _ensure_deployment(cur, ref: str | None) -> int | None:
 
 def _insert_header(cur, h: _Header, root) -> int:
     v = dict(h.v)
+    for k in ("description", "quality_assurance", "bespoke_data", "metadata_info",
+              "algorithm_parameters", "algorithm_support"):
+        v[k] = h.jsonb(k)
+    v["exact_xml"] = Jsonb(h.exact_xml) if h.exact_xml else None
     v["xml_namespace"] = etree.QName(root.tag).namespace
     v["root_attrs"] = json.dumps(dict(root.attrib)) if root.attrib else None
     v["deployment_id"] = _ensure_deployment(cur, v["deployment_ref"])
@@ -361,9 +372,10 @@ def ingest(conn: psycopg.Connection, source, replace: bool = False,
             set_id = _insert_header(cur, h, root)
 
         cur.execute(
-            "UPDATE nereus.detection_set SET bespoke_data_xml = %s, "
-            "metadata_info_xml = %s, has_offeffort = %s WHERE id = %s",
-            (h.v["bespoke_data_xml"], h.v["metadata_info_xml"],
+            "UPDATE nereus.detection_set SET bespoke_data = %s, metadata_info = %s, "
+            "exact_xml = %s, has_offeffort = %s WHERE id = %s",
+            (h.jsonb("bespoke_data"), h.jsonb("metadata_info"),
+             Jsonb(h.exact_xml) if h.exact_xml else None,
              has_off, set_id))
         cur.execute("SELECT nereus.refresh_summary(%s)", (set_id,))
     return {"set_id": set_id, "doc_id": h.v.get("doc_id"), "detections": n}

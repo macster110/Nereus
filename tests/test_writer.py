@@ -83,6 +83,38 @@ def test_sql_written_set_exports_as_asa_xml(conn, tmp_path):
     assert before == after
 
 
+def test_writer_dicts_become_json_and_valid_xml(conn, tmp_path):
+    """Parameters, metadata and UserDefined go in as plain dicts, are searchable
+    jsonb, and export as schema-valid XML even if keys come in the wrong order."""
+    sid = create_detection_set(
+        conn, "TESTW_json", deployment="TESTW_DEP", effort_start=T0,
+        effort_end=T0 + timedelta(days=1), kinds=[Kind(180473, "Clicks")],
+        software="PAMGuard", replace=True,
+        algorithm_parameters={"Threshold": {"@units": "dB", "#text": 12},
+                              "Classifier": {"Name": "porpoise", "MinICI_ms": 2}},
+        description={"Method": "Click detector", "Objectives": "Porpoise presence"},  # wrong order
+        metadata_info={"UpdateFrequency": "as-needed", "Date": "2026-06-01T00:00:00Z",
+                       "Contact": {"organizationName": "SMRU", "individualName": "J. M."}})
+    append_detections(conn, sid, [{**d, "user_defined": {"TrainId": i, "ICI_ms": 35.2}}
+                                  for i, d in enumerate(dets(5))])
+    close_detection_set(conn, sid)
+    assert conn.execute(
+        "SELECT count(*) FROM nereus.detection WHERE set_id = %s AND (user_defined->>'TrainId')::int >= 3",
+        (sid,)).fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT algorithm_parameters->'Classifier'->>'Name' FROM nereus.detection_set WHERE id = %s",
+        (sid,)).fetchone()[0] == "porpoise"
+    out = tmp_path / "json.xml"
+    with open(out, "w", encoding="utf-8") as f:
+        export(conn, "TESTW_json", f)
+    text = out.read_text()
+    assert text.index("<Objectives>") < text.index("<Method>")
+    assert "<TrainId>3</TrainId>" in text
+    if XSD:
+        schema = load_schema(XSD)
+        assert schema.validate(etree.parse(str(out))), schema.error_log
+
+
 def test_append_to_missing_set_fails(conn):
     with pytest.raises(KeyError):
         append_detections(conn, 999_999_999, dets(1))

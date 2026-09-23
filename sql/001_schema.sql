@@ -1,11 +1,18 @@
 -- Nereus Phase 0 proof of concept: relational storage for ASA/Tethys Detections.
 --
--- Mapping rule of thumb:
---   * Anything people filter, join or aggregate on is a typed column.
---   * Descriptive or open-ended blocks (Description, QualityAssurance,
---     MetadataInfo, BespokeData, xs:any Parameters/UserDefined) are kept as the
---     exact XML fragment so export is lossless, with a JSONB projection where
---     it is useful for searching.
+-- Where things go:
+--   * Tables: anything people filter, join or aggregate on, and any list of
+--     uniform records that can grow large (detections, effort kinds, gaps).
+--     Fixed structs are flattened into columns; numeric vectors (contours)
+--     are float8[] arrays.
+--   * jsonb: descriptive blocks and lists of complicated or free-form structs
+--     that are read as a unit (Description, QualityAssurance, MetadataInfo,
+--     BespokeData, Algorithm Parameters and SupportSoftware, UserDefined).
+--     Searchable with ->, ->>, @> and jsonpath; see nereus/xmljson.py for
+--     the XML <-> JSON mapping.
+--   * exact_xml / user_defined_xml: NULL unless a block could not be held
+--     exactly as JSON (e.g. text between child elements); then the original
+--     XML is kept too, and export uses it.
 --
 -- Scope: Detections documents plus a minimal deployment table. Localize,
 -- Calibration and Ensemble follow the same pattern and are not in this PoC.
@@ -44,12 +51,13 @@ CREATE TABLE detection_set (
     algorithm_method      text,
     algorithm_software    text,
     algorithm_version     text,
-    algorithm_params_xml  text,                  -- Algorithm/Parameters (exact fragment)
-    algorithm_support_xml text[],                -- SupportSoftware elements (exact fragments)
-    description_xml       text,
-    quality_assurance_xml text,
-    bespoke_data_xml      text,
-    metadata_info_xml     text,
+    algorithm_parameters  jsonb,                 -- Algorithm/Parameters (xs:any)
+    algorithm_support     jsonb,                 -- [SupportSoftware, ...]
+    description           jsonb,                 -- {Objectives, Abstract, Method}
+    quality_assurance     jsonb,
+    bespoke_data          jsonb,
+    metadata_info         jsonb,                 -- {Contact, Date, UpdateFrequency}
+    exact_xml             jsonb,                 -- {block name: original XML}, only when needed
     effort_start          timestamptz NOT NULL,
     effort_end            timestamptz NOT NULL,
     intensity_ref_upa     double precision,
@@ -132,7 +140,8 @@ CREATE TABLE detection (
     tonal_db          double precision[],
     has_tonal         boolean NOT NULL DEFAULT false,
     event_ref         text[],
-    user_defined_xml  text,
+    user_defined      jsonb,                     -- Parameters/UserDefined (xs:any)
+    user_defined_xml  text,                      -- original XML, only when JSON can't hold it exactly
     image             text,
     audio             text,
     comment           text,
@@ -143,6 +152,9 @@ CREATE TABLE detection (
 CREATE INDEX detection_species_time_ix ON detection (species_tsn, t_start);
 CREATE INDEX detection_t_brin          ON detection USING brin (t_start);
 CREATE INDEX detection_t_gix           ON detection USING gist (t);
+-- No index on user_defined by default: most datasets don't use it, and a GIN
+-- index slows every insert. Where a project searches it, add one, e.g.
+--   CREATE INDEX ON nereus.detection USING gin (user_defined jsonb_path_ops);
 
 -- ------------------------------------------------------------- summary layer
 -- Detection-positive minutes per UTC day, per deployment/species/call, with the

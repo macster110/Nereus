@@ -18,11 +18,15 @@ transaction. XML is not involved at any point, but the result can still be
 exported as ASA/Tethys XML (nereus.export) when someone needs that format.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
 import psycopg
+from psycopg.types.json import Jsonb
+
+from .xmljson import from_python
 
 # Columns a writer may fill; anything not given is NULL.
 DETECTION_FIELDS = [
@@ -30,13 +34,13 @@ DETECTION_FIELDS = [
     "species_tsn", "species_group", "calls", "subtype", "score", "confidence",
     "qa", "received_level_db", "freq_measurements_db", "snr_db", "min_freq_hz",
     "max_freq_hz", "peak_freq_hz", "peaks_hz", "duration_s", "sideband_hz",
-    "tonal_offset_s", "tonal_hz", "tonal_db", "event_ref", "user_defined_xml",
+    "tonal_offset_s", "tonal_hz", "tonal_db", "event_ref", "user_defined",
     "image", "audio", "comment",
 ]
 _PARAM_FIELDS = {"subtype", "score", "confidence", "qa", "received_level_db",
                  "freq_measurements_db", "snr_db", "min_freq_hz", "max_freq_hz",
                  "peak_freq_hz", "peaks_hz", "duration_s", "sideband_hz",
-                 "tonal_offset_s", "tonal_hz", "tonal_db", "event_ref", "user_defined_xml"}
+                 "tonal_offset_s", "tonal_hz", "tonal_db", "event_ref", "user_defined"}
 _ARRAY_FIELDS = {"freq_measurements_db", "peaks_hz", "sideband_hz",
                  "tonal_offset_s", "tonal_hz", "tonal_db"}
 _COLS = ["set_id", "ord", "on_effort", *DETECTION_FIELDS, "has_parameters", "has_tonal"]
@@ -76,9 +80,19 @@ def create_detection_set(conn: psycopg.Connection, doc_id: str, *, deployment: s
                          kinds: list[Kind], user_id: str = "",
                          method: str | None = None, software: str = "",
                          version: str | None = None,
-                         algorithm_params_xml: str | None = "<Parameters/>",
+                         algorithm_parameters: dict | None = None,
+                         description: dict | None = None,
+                         metadata_info: dict | None = None,
                          replace: bool = False) -> int:
-    """Create the equivalent of a Detections document header. Returns set_id."""
+    """Create the equivalent of a Detections document header. Returns set_id.
+
+    algorithm_parameters, description and metadata_info are plain dicts,
+    stored as searchable jsonb, e.g.
+        algorithm_parameters={"Threshold": {"@units": "dB", "#text": 12},
+                              "Classifier": "porpoise"}
+        description={"Objectives": "...", "Method": "..."}
+    (Keys starting "@" are XML attributes; see nereus/xmljson.py.)"""
+    as_json = lambda d: None if d is None else Jsonb(from_python(d))
     with conn.transaction():
         if replace:
             conn.execute("DELETE FROM nereus.detection_set WHERE doc_id = %s", (doc_id,))
@@ -92,11 +106,14 @@ def create_detection_set(conn: psycopg.Connection, doc_id: str, *, deployment: s
             INSERT INTO nereus.detection_set
                 (doc_id, xml_namespace, deployment_ref, deployment_id, user_id,
                  algorithm_method, algorithm_software, algorithm_version,
-                 algorithm_params_xml, effort_start, effort_end)
-            VALUES (%s, 'http://tethys.sdsu.edu/schema/1.0', %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 algorithm_parameters, description, metadata_info, effort_start, effort_end)
+            VALUES (%s, 'http://tethys.sdsu.edu/schema/1.0', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id""",
             (doc_id, deployment, dep_id, user_id, method, software, version,
-             algorithm_params_xml, effort_start, effort_end)).fetchone()[0]
+             # "" exports as an empty <Parameters/>, which the schema expects
+             Jsonb(from_python(algorithm_parameters) if algorithm_parameters else ""),
+             as_json(description), as_json(metadata_info),
+             effort_start, effort_end)).fetchone()[0]
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO nereus.effort_kind (set_id, ord, species_tsn, species_group, call, "
@@ -114,6 +131,8 @@ def _row(set_id: int, ord_: int, d: dict, on_effort: bool) -> tuple:
             v = _float_array(v)
         elif f in ("calls", "event_ref"):
             v = _text_array(v)
+        elif f == "user_defined" and v is not None:
+            v = json.dumps(from_python(v))  # any dict; stored as searchable jsonb
         vals.append(v)
     has_params = any(d.get(f) is not None for f in _PARAM_FIELDS)
     has_tonal = d.get("tonal_hz") is not None
