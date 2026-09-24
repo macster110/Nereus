@@ -34,8 +34,11 @@ existing data across. This test measures what that means in practice, on the
 3. Then the full run. The download and import are reused from step 2, so skip them:
 
    ```powershell
-   powershell -ExecutionPolicy Bypass -File compare\run_windows.ps1 -TethysDb C:\path\to\Tethys\databases\demodb -Extra "--skip-download","--skip-build"
+   powershell -ExecutionPolicy Bypass -Command "& .\compare\run_windows.ps1 -TethysDb 'C:\path\to\Tethys\databases\demodb' -Extra @('--skip-download','--skip-build')"
    ```
+
+   (Use `-Command` whenever you pass `-Extra`: with `-File`, PowerShell hands
+   `"--skip-download","--skip-build"` over as one argument.)
 
    Expect roughly an hour, mostly spent waiting on Tethys.
 

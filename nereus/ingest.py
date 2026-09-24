@@ -35,7 +35,7 @@ def pg_float_array(s: str | None) -> str | None:
 
 
 DETECTION_COLS = [
-    "set_id", "ord", "on_effort", "t_start", "t_end", "input_file", "count",
+    "set_id", "ord", "kind_ord", "deployment_id", "on_effort", "t_start", "t_end", "input_file", "count",
     "event", "unit_id", "channel", "species_tsn", "species_group", "calls",
     "has_parameters", "subtype", "score", "confidence", "qa",
     "received_level_db", "freq_measurements_db", "snr_db", "min_freq_hz",
@@ -74,7 +74,77 @@ _DET_SCALARS = {
 }
 
 
-def detection_row(el, set_id: int, ord_: int, on_effort: bool) -> tuple:
+class KindMatcher:
+    """Which Effort/Kind a detection answers, so its granularity is explicit.
+
+    A kind matches on species (and Group, when the kind gives one); when a
+    species has several kinds, the detection's Call narrows it down (a kind
+    naming one of its calls beats a kind with no call), then Subtype.
+    Exactly one match gives that kind's ord; anything else (no match, or
+    still ambiguous) gives None."""
+
+    def __init__(self, kinds: list[dict]):
+        self.kinds = kinds  # dicts with keys tsn, group, call, subtype
+        self.cache = {}
+
+    def __call__(self, tsn, group, calls, subtype) -> int | None:
+        key = (tsn, group, tuple(calls or ()), subtype)
+        if key not in self.cache:
+            self.cache[key] = self._match(*key)
+        return self.cache[key]
+
+    def _match(self, tsn, group, calls, subtype):
+        cands = [i for i, k in enumerate(self.kinds) if k["tsn"] == tsn
+                 and (k["group"] is None or k["group"] == group)]
+        if len(cands) > 1:
+            cands = ([i for i in cands if self.kinds[i]["call"] in calls]
+                     or [i for i in cands if self.kinds[i]["call"] is None])
+        if len(cands) > 1:
+            cands = [i for i in cands if self.kinds[i]["subtype"] == subtype] or cands
+        return cands[0] if len(cands) == 1 else None
+
+
+class Source:
+    """Where a detection set's detections came from. Resolves each
+    detection's deployment (from DataSource, or from UnitId via the
+    ensemble) and its Effort/Kind."""
+
+    def __init__(self, cur, deployment_ref: str | None, ensemble_ref: str | None,
+                 kinds: list[dict]):
+        self.kind = KindMatcher(kinds)
+        self.single = deployment_ref is not None
+        self.deployment_id = self.ensemble_id = None
+        self.units = {}
+        if deployment_ref is not None:
+            row = cur.execute("SELECT id FROM nereus.deployment WHERE deployment_id = %s",
+                              (deployment_ref,)).fetchone()
+            self.deployment_id = row[0] if row else None
+        if ensemble_ref is not None:
+            row = cur.execute("SELECT id FROM nereus.ensemble WHERE ensemble_id = %s",
+                              (ensemble_ref,)).fetchone()
+            if row:
+                self.ensemble_id = row[0]
+                self.units = dict(cur.execute(
+                    "SELECT unit_id, deployment_id FROM nereus.ensemble_unit "
+                    "WHERE ensemble_id = %s", (self.ensemble_id,)).fetchall())
+
+    @classmethod
+    def of_set(cls, cur, set_id: int) -> "Source":
+        """The Source of an existing detection set (used by the writer)."""
+        row = cur.execute("SELECT deployment_ref, ensemble_ref FROM nereus.effort "
+                          "WHERE set_id = %s", (set_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"no detection set {set_id}")
+        kinds = [dict(zip(("tsn", "group", "call", "subtype"), k)) for k in cur.execute(
+            "SELECT species_tsn, species_group, call, subtype FROM nereus.effort_kind "
+            "WHERE set_id = %s ORDER BY ord", (set_id,)).fetchall()]
+        return cls(cur, row[0], row[1], kinds)
+
+    def deployment(self, unit_id) -> int | None:
+        return self.deployment_id if self.single else self.units.get(unit_id)
+
+
+def detection_row(el, set_id: int, ord_: int, on_effort: bool, src: Source) -> tuple:
     r = dict.fromkeys(DETECTION_COLS)
     r.update(set_id=set_id, ord=ord_, on_effort=on_effort,
              has_parameters=False, has_tonal=False)
@@ -122,6 +192,8 @@ def detection_row(el, set_id: int, ord_: int, on_effort: bool) -> tuple:
         else:
             raise UnmappedElement(f"Detection/{name}")
     r["calls"] = calls or None
+    r["kind_ord"] = src.kind(r["species_tsn"], r["species_group"], calls, r["subtype"])
+    r["deployment_id"] = src.deployment(r["unit_id"])
     return tuple(r[k] for k in DETECTION_COLS)
 
 
@@ -205,8 +277,8 @@ class _Header:
                   "bespoke_data": None, "metadata_info": None,
                   "algorithm_method": None, "algorithm_software": None,
                   "algorithm_version": None, "algorithm_parameters": None,
-                  "algorithm_support": None, "deployment_ref": None,
-                  "ensemble_ref": None, "user_id": None}
+                  "algorithm_support": None, "user_id": None}
+        self.source = {"deployment_ref": None, "ensemble_ref": None}
         self.exact_xml = {}  # blocks JSON can't hold exactly: name -> original XML
         self.effort = None
 
@@ -228,9 +300,9 @@ class _Header:
             for c in el:
                 cn = local(c.tag)
                 if cn == "DeploymentId":
-                    self.v["deployment_ref"] = text(c)
+                    self.source["deployment_ref"] = text(c)
                 elif cn == "EnsembleId":
-                    self.v["ensemble_ref"] = text(c)
+                    self.source["ensemble_ref"] = text(c)
                 else:
                     raise UnmappedElement(f"DataSource/{cn}")
         elif n == "Algorithm":
@@ -264,17 +336,7 @@ class _Header:
         return None if v is None else Jsonb(v)
 
 
-def _ensure_deployment(cur, ref: str | None) -> int | None:
-    if not ref:
-        return None
-    cur.execute(
-        "INSERT INTO nereus.deployment (deployment_id) VALUES (%s) "
-        "ON CONFLICT (deployment_id) DO UPDATE SET deployment_id = EXCLUDED.deployment_id "
-        "RETURNING id", (ref,))
-    return cur.fetchone()[0]
-
-
-def _insert_header(cur, h: _Header, root) -> int:
+def _insert_header(cur, h: _Header, root) -> tuple[int, Source]:
     v = dict(h.v)
     for k in ("description", "quality_assurance", "bespoke_data", "metadata_info",
               "algorithm_parameters", "algorithm_support"):
@@ -282,10 +344,6 @@ def _insert_header(cur, h: _Header, root) -> int:
     v["exact_xml"] = Jsonb(h.exact_xml) if h.exact_xml else None
     v["xml_namespace"] = etree.QName(root.tag).namespace
     v["root_attrs"] = json.dumps(dict(root.attrib)) if root.attrib else None
-    v["deployment_id"] = _ensure_deployment(cur, v["deployment_ref"])
-    v["effort_start"] = h.effort["start"]
-    v["effort_end"] = h.effort["end"]
-    v["intensity_ref_upa"] = h.effort["intensity"]
     cols = list(v)
     cur.execute(
         f"INSERT INTO nereus.detection_set ({', '.join(cols)}) "
@@ -293,9 +351,18 @@ def _insert_header(cur, h: _Header, root) -> int:
         [v[c] for c in cols])
     set_id = cur.fetchone()[0]
 
+    ref = h.source
+    src = Source(cur, ref["deployment_ref"], ref["ensemble_ref"], h.effort["kinds"])
+    cur.execute(
+        "INSERT INTO nereus.effort (set_id, deployment_ref, ensemble_ref, deployment_id, "
+        "ensemble_id, t_start, t_end, intensity_ref_upa) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+        (set_id, ref["deployment_ref"], ref["ensemble_ref"], src.deployment_id,
+         src.ensemble_id, h.effort["start"], h.effort["end"], h.effort["intensity"]))
     for i, k in enumerate(h.effort["kinds"]):
         cur.execute(
-            "INSERT INTO nereus.effort_kind VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO nereus.effort_kind (set_id, ord, species_tsn, species_group, call, "
+            "subtype, freq_measurements_hz, has_parameters, granularity, bin_size_min, "
+            "first_bin_start, encounter_gap_min) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
             (set_id, i, k["tsn"], k["group"], k["call"], k["subtype"], k["freq"],
              k["has_params"], k["granularity"], k["bin"], k["first"], k["gap"]))
     for i, g in enumerate(h.effort["periodic"]):
@@ -304,7 +371,7 @@ def _insert_header(cur, h: _Header, root) -> int:
     for i, g in enumerate(h.effort["aperiodic"]):
         cur.execute("INSERT INTO nereus.analysis_gap_aperiodic VALUES (%s,%s,%s,%s,%s)",
                     (set_id, i, *g))
-    return set_id
+    return set_id, src
 
 
 def load_schema(path) -> etree.XMLSchema:
@@ -315,6 +382,8 @@ def load_schema(path) -> etree.XMLSchema:
 def ingest(conn: psycopg.Connection, source, replace: bool = False,
            schema: etree.XMLSchema | None = None) -> dict:
     """Import one Detections document (path or file object).
+    Its DataSource is linked to the Deployment or Ensemble when that is
+    already imported; otherwise the link is made when it arrives.
     With `schema`, the document is validated against the XSD while it streams
     in; an invalid document raises etree.XMLSyntaxError and nothing is stored.
     Returns {'set_id', 'doc_id', 'detections'}. Runs in one transaction."""
@@ -340,7 +409,7 @@ def ingest(conn: psycopg.Connection, source, replace: bool = False,
                         if replace and "doc_id" in h.v:
                             cur.execute("DELETE FROM nereus.detection_set WHERE doc_id = %s",
                                         (h.v["doc_id"],))
-                        set_id = _insert_header(cur, h, root)
+                        set_id, src = _insert_header(cur, h, root)
                         copier = stack.enter_context(cur.copy(
                             f"COPY nereus.detection ({', '.join(DETECTION_COLS)}) FROM STDIN"))
                     if group == "OffEffort":
@@ -352,7 +421,7 @@ def ingest(conn: psycopg.Connection, source, replace: bool = False,
                     and parent.getparent() is root:
                 if local(el.tag) != "Detection":
                     raise UnmappedElement(f"{group}/{local(el.tag)}")
-                copier.write_row(detection_row(el, set_id, n, group == "OnEffort"))
+                copier.write_row(detection_row(el, set_id, n, group == "OnEffort", src))
                 n += 1
                 el.clear()
                 while el.getprevious() is not None:  # free parsed siblings
@@ -369,7 +438,7 @@ def ingest(conn: psycopg.Connection, source, replace: bool = False,
 
         stack.close()  # finish the COPY before running further statements
         if set_id is None:  # document with no OnEffort element: still store the header
-            set_id = _insert_header(cur, h, root)
+            set_id, _ = _insert_header(cur, h, root)
 
         cur.execute(
             "UPDATE nereus.detection_set SET bespoke_data = %s, metadata_info = %s, "

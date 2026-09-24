@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic Deployment exercising every element in Deployment.xsd.
+     Values are made up; it exists only to test the round trip. Its Id is
+     the DeploymentId of kitchen_sink.xml, so the two link up. -->
+<Deployment xmlns="http://tethys.sdsu.edu/schema/1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://tethys.sdsu.edu/schema/1.0 tethys.xsd">
+   <Id>TEST_DEP_01</Id>
+   <Description>
+      <Objectives>Test every Deployment element &amp; odd characters: &lt;tag&gt; ümlaut</Objectives>
+      <Abstract>Synthetic.</Abstract>
+      <Method>Hand written.</Method>
+   </Description>
+   <Project>TEST_PROJECT</Project>
+   <DeploymentNumber>7</DeploymentNumber>
+   <DeploymentAlias>Mooring 7</DeploymentAlias>
+   <Site>North Bank</Site>
+   <SiteAliases>
+      <Site>NB</Site>
+      <Site>Site 3</Site>
+   </SiteAliases>
+   <Cruise>TEST-2026-01</Cruise>
+   <Platform>glider</Platform>
+   <Region>Test Sea</Region>
+   <Instrument>
+      <Type>SoundTrap ST600 HF</Type>
+      <InstrumentId>TEST-5123</InstrumentId>
+      <GeometryType>rigid</GeometryType>
+   </Instrument>
+   <SamplingDetails>
+      <Channel>
+         <ChannelNumber>1</ChannelNumber>
+         <SensorNumber>0</SensorNumber>
+         <Start>2021-05-31T12:00:00Z</Start>
+         <End>2021-06-30T12:00:00.500Z</End>
+         <EventTrigger>
+            <Description>
+               <Method>Record only when the click detector fires.</Method>
+            </Description>
+            <Algorithm>
+               <Method>Energy detector</Method>
+               <Software>SoundTrap firmware</Software>
+               <Version>4.1</Version>
+               <Parameters>
+                  <Threshold units="dB">10</Threshold>
+               </Parameters>
+            </Algorithm>
+         </EventTrigger>
+         <Sampling>
+            <Regimen>
+               <TimeStamp>2021-05-31T12:00:00Z</TimeStamp>
+               <SampleRate_kHz>576</SampleRate_kHz>
+               <SampleBits>16</SampleBits>
+            </Regimen>
+            <Regimen>
+               <TimeStamp>2021-06-15T00:00:00Z</TimeStamp>
+               <SampleRate_kHz>96.5</SampleRate_kHz>
+               <SampleBits>24</SampleBits>
+            </Regimen>
+         </Sampling>
+         <Gain>
+            <Regimen>
+               <TimeStamp>2021-05-31T12:00:00Z</TimeStamp>
+               <Gain_dB>12</Gain_dB>
+            </Regimen>
+            <Regimen>
+               <TimeStamp>2021-06-15T00:00:00Z</TimeStamp>
+               <Gain_rel>0.5</Gain_rel>
+            </Regimen>
+         </Gain>
+         <DutyCycle>
+            <Regimen>
+               <TimeStamp>2021-05-31T12:00:00Z</TimeStamp>
+               <RecordingDuration_s Offfset_s="30">300</RecordingDuration_s>
+               <RecordingInterval_s>900</RecordingInterval_s>
+            </Regimen>
+         </DutyCycle>
+      </Channel>
+      <Channel>
+         <ChannelNumber>2</ChannelNumber>
+         <SensorNumber>1</SensorNumber>
+         <Start>2021-05-31T12:00:00Z</Start>
+         <End>2021-06-30T12:00:00Z</End>
+         <Sampling>
+            <Regimen>
+               <TimeStamp>2021-05-31T12:00:00Z</TimeStamp>
+               <SampleRate_kHz>576</SampleRate_kHz>
+               <SampleBits>16</SampleBits>
+            </Regimen>
+         </Sampling>
+         <Gain/>
+         <DutyCycle/>
+      </Channel>
+   </SamplingDetails>
+   <QualityAssurance>
+      <Description>
+         <Objectives>Flag unusable audio.</Objectives>
+      </Description>
+      <ResponsibleParty id="qa1">
+         <organizationName>Test Lab</organizationName>
+      </ResponsibleParty>
+      <Quality>
+         <Start>2021-06-02T00:00:00Z</Start>
+         <End>2021-06-04T00:00:00Z</End>
+         <Category>unusable</Category>
+         <FrequencyRange>
+            <Low_Hz>0</Low_Hz>
+            <High_Hz>2000</High_Hz>
+         </FrequencyRange>
+         <Channel>1</Channel>
+         <Channel>2</Channel>
+         <Comment>Flow noise</Comment>
+      </Quality>
+      <Quality>
+         <Start>2021-06-04T00:00:00Z</Start>
+         <End>2021-06-30T12:00:00Z</End>
+         <Category>good</Category>
+      </Quality>
+   </QualityAssurance>
+   <Data>
+      <Audio>
+         <URI>s3://example-bucket/test/audio/</URI>
+         <FurtherInformationURL>https://example.org/test</FurtherInformationURL>
+         <ServiceExpectation>Until 2030</ServiceExpectation>
+         <Processed>s3://example-bucket/test/decimated/</Processed>
+         <Raw>s3://example-bucket/test/raw/</Raw>
+      </Audio>
+      <Tracks>
+         <SpeedUnit>m/s</SpeedUnit>
+         <Track>
+            <TrackId>1</TrackId>
+            <Point>
+               <TimeStamp>2021-05-31T12:00:00Z</TimeStamp>
+               <Longitude>200.5</Longitude>
+               <Latitude>21.25</Latitude>
+               <Heading_DegN>45</Heading_DegN>
+               <CourseOverGround_DegN north="true">47.5</CourseOverGround_DegN>
+               <Speed>0.3</Speed>
+               <SpeedOverGround>0.35</SpeedOverGround>
+               <Pitch_deg>25</Pitch_deg>
+               <Roll_deg>1.5</Roll_deg>
+               <Elevation_m>-120</Elevation_m>
+               <GroundElevation_m>-3000</GroundElevation_m>
+            </Point>
+            <Point>
+               <TimeStamp>2021-05-31T12:00:00Z</TimeStamp>
+            </Point>
+         </Track>
+         <Track>
+            <Point>
+               <TimeStamp>2021-06-01T00:00:00Z</TimeStamp>
+               <Longitude>200.6</Longitude>
+               <Latitude>21.3</Latitude>
+            </Point>
+         </Track>
+         <TrackEffort>
+            <OnPath>
+               <TrackId>1</TrackId>
+               <Start>2021-05-31T12:00:00Z</Start>
+               <End>2021-06-01T00:00:00Z</End>
+            </OnPath>
+            <OffPath>
+               <Start>2021-06-01T00:00:00Z</Start>
+               <End>2021-06-01T01:00:00Z</End>
+               <Comment>Surfacing</Comment>
+            </OffPath>
+         </TrackEffort>
+         <URI>s3://example-bucket/test/track1.csv</URI>
+         <URI>s3://example-bucket/test/track2.csv</URI>
+         <FurtherInformationURL>https://example.org/test/tracks</FurtherInformationURL>
+         <ServiceExpectation>Until 2030</ServiceExpectation>
+      </Tracks>
+   </Data>
+   <DeploymentDetails>
+      <Longitude>200.5</Longitude>
+      <Latitude>21.25</Latitude>
+      <ElevationInstrument_m>-120.5</ElevationInstrument_m>
+      <DepthInstrument_m>120.5</DepthInstrument_m>
+      <Elevation_m>-3000</Elevation_m>
+      <TimeStamp>2021-05-31T11:00:00Z</TimeStamp>
+      <AudioTimeStamp>2021-05-31T12:00:00Z</AudioTimeStamp>
+      <Vessel>RV Test</Vessel>
+      <Person id="p1">
+         <surname>Person</surname>
+         <name>Test</name>
+         <userID>tp</userID>
+         <affiliation>Test Lab</affiliation>
+         <phoneNumber>000</phoneNumber>
+         <email>test@example.org</email>
+      </Person>
+   </DeploymentDetails>
+   <RecoveryDetails>
+      <Longitude>200.6</Longitude>
+      <Latitude>21.3</Latitude>
+      <TimeStamp>2021-06-30T13:00:00Z</TimeStamp>
+      <AudioTimeStamp>2021-06-30T12:00:00.500Z</AudioTimeStamp>
+      <ResponsibleParty>
+         <individualName>Test Person</individualName>
+         <organizationName>Test Lab</organizationName>
+      </ResponsibleParty>
+   </RecoveryDetails>
+   <Sensors>
+      <ReferencePoint>Glider nose</ReferencePoint>
+      <Audio>
+         <Number>0</Number>
+         <SensorId>TEST-HYD-001</SensorId>
+         <Geometry>
+            <x_m>0.1</x_m>
+            <y_m>0</y_m>
+            <z_m>-0.25</z_m>
+         </Geometry>
+         <Name>Port hydrophone</Name>
+         <Description>HTI-92</Description>
+         <HydrophoneId>TEST-HYD-001</HydrophoneId>
+         <PreampId>TEST-PRE-9</PreampId>
+      </Audio>
+      <Audio>
+         <Number>1</Number>
+         <SensorId>TEST-HYD-002</SensorId>
+         <HydrophoneId>TEST-HYD-002</HydrophoneId>
+      </Audio>
+      <Depth>
+         <Number>0</Number>
+         <SensorId>TEST-DEPTH-1</SensorId>
+         <Description>Pressure sensor</Description>
+      </Depth>
+      <Sensor>
+         <Number>0</Number>
+         <SensorId>TEST-TEMP-1</SensorId>
+         <Name>Thermistor</Name>
+         <Type>Temperature</Type>
+         <Properties>
+            <Accuracy_C>0.01</Accuracy_C>
+            <Range_C>-5 35</Range_C>
+         </Properties>
+      </Sensor>
+   </Sensors>
+   <MetadataInfo>
+      <Contact>
+         <individualName>Test Person</individualName>
+      </Contact>
+      <Date>2026-01-01T00:00:00Z</Date>
+      <UpdateFrequency>as-needed</UpdateFrequency>
+   </MetadataInfo>
+</Deployment>

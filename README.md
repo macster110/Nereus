@@ -14,17 +14,19 @@ standard (deployments, effort, detections, localizations).
   be appended in batches while a deployment runs.
 * **Reading:** users query with SQL, directly or through thin R, MATLAB and
   Python wrappers, and get tables back.
-* **Tethys compatibility:** existing Tethys/ASA XML documents can be imported
-  (`nereus/ingest.py`), and any dataset can be exported as ASA XML
-  (`nereus/export.py`) for exchange or archiving.
+* **Tethys compatibility:** existing Tethys/ASA Deployment, Ensemble and
+  Detections documents can be imported (`nereus.cli ingest`), and any of them
+  exported again as ASA XML (`nereus.cli export`) for exchange or archiving.
 
 This PoC answers three questions:
 
-1. **Can ASA Detections XML round-trip through SQL tables without losing
-   anything?** Yes. All **262 real Detections documents** from the Tethys 3.2
-   demo database (3.6 GB, 478,073 detections, mostly whistle contours) come back
-   equivalent and still valid against Tethys's `tethys.xsd`. So do the Nilus
-   examples and a test document that uses every element in the Detections schema.
+1. **Can ASA XML round-trip through SQL tables without losing anything?** Yes.
+   All **262 real Detections documents** from the Tethys 3.2 demo database
+   (3.6 GB, 478,073 detections, mostly whistle contours) and all **871
+   Deployment documents** (858 distinct, including 29 drifters and towed
+   arrays with GPS tracks) come back equivalent and still valid against Tethys's
+   `tethys.xsd`. So do the two demo Ensembles, the Nilus examples, and test
+   documents that use every element in the Detections and Deployment schemas.
 2. **Is it meaningfully faster and smaller?** On ~1M detections, typical queries
    take milliseconds, and a full-database download is 26 MB of Parquet instead
    of 531 MB of XML. See [bench/RESULTS.md](bench/RESULTS.md). A head-to-head
@@ -42,9 +44,20 @@ Requires Homebrew `postgresql@17` and `postgis`.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 scripts/pg.sh init                     # local cluster in ./.pgdata on port 5439
-.venv/bin/python -m nereus.cli roundtrip data/examples/*.xml tests/fixtures/kitchen_sink.xml
+.venv/bin/python -m nereus.cli roundtrip data/examples tests/fixtures
 .venv/bin/python -m pytest -q tests
 ```
+
+Round-trip a whole Tethys database's documents (a directory means every
+`.xml` in it; `--quiet` prints only documents that differ):
+
+```bash
+.venv/bin/python -m nereus.cli roundtrip <demodb>/source-docs/Deployments --quiet
+```
+
+Deployments are best imported before the Detections that refer to them, but
+either order works: references are kept as written and linked when the other
+document arrives.
 
 Benchmark (about 1 minute to ingest; the data is ~530 MB):
 
@@ -59,37 +72,71 @@ with the same verbs.
 
 To validate against the Tethys schema, point `--xsd` (or `NEREUS_XSD`) at a
 Tethys install's `databases/<db>/lib/schema/tethys.xsd`. With it set,
-`pytest` also checks that every exported document validates.
+`pytest` also checks that every exported document validates. Set
+`NEREUS_DEMO` to `<demodb>/source-docs` and `pytest` round-trips the demo
+database's Deployments and Ensembles too.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `sql/001_schema.sql` | Tables, indexes, daily summary function, read-only role |
+| `sql/001_schema.sql` | Tables, indexes, linking and daily summary functions, read-only role |
 | `nereus/writer.py` | **Native SQL writer**: create a detection set, append detections (COPY or batched INSERT) |
 | `sql/examples/write_detections.sql` | The same writes as raw SQL, as a JDBC writer would send them |
-| `nereus/ingest.py` | Tethys XML import: streaming parser, COPY into Postgres, strict about unknown elements |
-| `nereus/export.py` | Rows back to ASA XML in schema element order, streamed |
+| `nereus/documents.py` | One entry point: import or export any supported document by its root element or Id |
+| `nereus/ingest.py` | Detections import: streaming parser, COPY into Postgres, strict about unknown elements |
+| `nereus/export.py` | Detections back to ASA XML in schema element order, streamed |
+| `nereus/deployment.py` | Deployment import and export (project, site, instrument, channels, QA, tracks, sensors) |
+| `nereus/ensemble.py` | Ensemble import and export |
 | `nereus/xmljson.py` | XML blocks ↔ searchable JSON (jsonb), exact in both directions |
 | `nereus/canonical.py` | "Same information?" comparison used by the round-trip check (streaming) |
-| `nereus/deployment.py` | Minimal Deployment import: id, position, times |
-| `tests/` | Round-trip, JSON search, writer, summary and rejection tests |
+| `tests/` | Round-trip, linking, JSON search, writer, summary and rejection tests |
 | `bench/` | Synthetic data generator and benchmark |
 | `compare/` | Nereus (SQL) vs Tethys (XML) read and write speed test, run on Windows ([README](compare/README.md)) |
 | `scripts/` | Local PostgreSQL cluster: `pg.sh` (macOS/Linux), `pg.ps1` (Windows) |
 | `data/examples/` | The two Nilus example documents from Tethys 3.2 |
 
+## The data model
+
+Nereus follows Tethys/ASA element for element, but splits things differently:
+
+* **project, site, instrument** are rows shared by many deployments (Tethys
+  repeats them as strings in every Deployment; export writes them back).
+* **Recorders and hydrophones are separate assets** (`instrument`, `sensor`):
+  hydrophones move between recorders, and calibrations belong to them.
+* **Two kinds of effort.** *Recording* effort is when usable audio exists
+  (`recording_effort` view: channel spans minus unusable QA periods).
+  *Analysis* effort is what was looked for, when, and at what granularity
+  (`effort`, `effort_kind`). "Absent" means analysis effort without
+  detections, within recording effort.
+* **Every detection knows its deployment and its effort kind**
+  (`detection.deployment_id`, `detection.kind_ord`), so a 1 s positive-second
+  bin and a single call can share one table and still be told apart. With an
+  Ensemble source, the detection's `UnitId` picks the deployment.
+* **References are kept as written and linked whichever document arrives
+  first** (`link_deployment()`, `link_ensemble()`), so importing Detections
+  before their Deployment is fine.
+
 ## What goes in tables, and what goes in JSON
 
 | ASA element | Stored as |
 |---|---|
-| `Detections` header (Id, DataSource, Algorithm method/software/version, UserId, Effort Start/End) | `detection_set` columns |
+| `Deployment` Project, Site, Instrument | shared `project`, `site`, `instrument` rows |
+| `Deployment` single-valued fields, DeploymentDetails, RecoveryDetails | `deployment` columns (longitudes as written; `deploy_location` is generated) |
+| `SamplingDetails/Channel` and its Sampling, Gain, DutyCycle regimens | `channel`, `channel_sampling`, `channel_gain`, `channel_duty_cycle` rows |
+| `QualityAssurance/Quality` | `recording_quality` rows |
+| `Data/Tracks/Track/Point` | `track`, `track_point` rows (with a PostGIS point) |
+| `Sensors/Audio`, `Depth`, `Sensor` | `deployment_sensor` rows; HydrophoneId, PreampId, SensorId become `sensor` assets |
+| `Ensemble/Unit` | `ensemble`, `ensemble_unit` rows |
+| `Detections` header (Id, Algorithm method/software/version, UserId) | `detection_set` columns |
+| `DataSource`, `Effort` Start/End | `effort` (one per detection set) |
 | `Effort/Kind` (species, call, granularity + attributes) | `effort_kind` rows |
 | `Effort/AnalysisGaps` | `analysis_gap_periodic`, `analysis_gap_aperiodic` rows |
 | `Detection` and every scalar in `Detection/Parameters` | `detection` columns; contours and other number lists are `float8[]` |
-| `Algorithm/Parameters`, `SupportSoftware`, `Description`, `QualityAssurance`, `BespokeData`, `MetadataInfo` | `jsonb` columns on `detection_set` |
+| `Description`, `QualityAssurance` descriptions, `MetadataInfo`, contacts, `Algorithm/Parameters`, `SupportSoftware`, `BespokeData`, `EventTrigger`, `TrackEffort`, sensor `Properties` | `jsonb` columns |
 | `Detection/Parameters/UserDefined` | `detection.user_defined` (`jsonb`) |
 | (derived) | `summary_daily`: detection-positive minutes per UTC day with effort minutes, filled on write |
+| (sketch, not imported yet) | `localization_set`, `localization`, `localization_detection`, `calibration` |
 
 The rule:
 
@@ -131,9 +178,14 @@ comparison does catch a real change.
 
 ## Not covered yet
 
-* **Other document types:** Deployment (only a minimal table exists, with
-  location, which the benchmark fills), Localize, Calibration and Ensemble.
-  They would follow the same pattern.
+* **Localize and Calibration documents:** the tables are sketched in the
+  schema but there is no importer yet. They follow the same pattern.
+* **Instrument identity in legacy data:** the demo HARP deployments use the
+  deployment name as InstrumentId, so they produce one "instrument" each, and
+  placeholder serials (a preamp called `custom` on 60 deployments) become one
+  shared asset. New uploads can ask for real serials.
+* **Duty cycles** are flagged in `recording_effort` but not expanded into
+  on/off intervals.
 * **The ANSI/ASA schema itself:** validation uses Tethys 3.2's `tethys.xsd`.
   The published standard's schema hasn't been obtained yet.
 * **The ASA namespace:** the examples use the Tethys namespace
@@ -162,3 +214,9 @@ comparison does catch a real change.
   valid XML, but it's easy to lose: lxml's `cleanup_namespaces` drops the
   `xmlns=""`, and so does lxml when *building* such elements. Nereus records it
   in the JSON (`"#ns": ""`) and writes it back explicitly, with tests.
+* **Ensemble UnitId 0:** `Ensemble.xsd` declares `UnitId` as
+  `xs:positiveInteger`, but both demo Ensembles number their units from 0, so
+  neither validates. Nereus imports them without validation.
+* **Pitch is non-negative:** `Deployment.xsd` restricts track
+  `Pitch_deg` to ≥ 0, so a glider diving nose-down can't be recorded as a
+  negative pitch.

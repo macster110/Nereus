@@ -105,11 +105,26 @@ def _detection(r: dict, ns: str | None = None) -> str:
     return "".join(out)
 
 
-def _effort(cur, s: dict) -> str:
+def root_open(name: str, ns: str | None, attrs) -> str:
+    """XML declaration and root start tag, with the root attributes kept at import."""
+    if isinstance(attrs, str):
+        attrs = json.loads(attrs)
+    root_attr = []
+    need_xsi = False
+    for k, v in (attrs or {}).items():
+        if k.startswith(f"{{{XSI}}}"):
+            need_xsi = True
+            k = "xsi:" + k.split("}", 1)[1]
+        root_attr.append(f" {k}={quoteattr(v)}")
+    nsdecl = (f' xmlns="{ns}"' if ns else "") + (f' xmlns:xsi="{XSI}"' if need_xsi else "")
+    return f'<?xml version="1.0" encoding="UTF-8"?>\n<{name}{"".join(root_attr)}{nsdecl}>\n'
+
+
+def _effort(cur, s: dict, e: dict) -> str:
     d = 2
     out = [f"{IND}<Effort>\n",
-           _el("Start", format_time(s["effort_start"]), d),
-           _el("End", format_time(s["effort_end"]), d)]
+           _el("Start", format_time(e["t_start"]), d),
+           _el("End", format_time(e["t_end"]), d)]
     cur.execute("SELECT t, duration_s, offset_s, interval_s FROM nereus.analysis_gap_periodic "
                 "WHERE set_id = %s ORDER BY ord", (s["id"],))
     periodic = cur.fetchall()
@@ -135,7 +150,7 @@ def _effort(cur, s: dict) -> str:
                     _el("End", format_time(b), 4), _opt("Reason", reason, 4),
                     f"{IND * 3}</Aperiodic>\n"]
         out.append(f"{IND * d}</AnalysisGaps>\n")
-    out.append(_opt("IntensityReference_uPa", s["intensity_ref_upa"], d, format_num))
+    out.append(_opt("IntensityReference_uPa", e["intensity_ref_upa"], d, format_num))
 
     cur.execute("SELECT * FROM nereus.effort_kind WHERE set_id = %s ORDER BY ord", (s["id"],))
     for k in cur.fetchall():
@@ -173,28 +188,18 @@ def _export(conn: psycopg.Connection, doc_id: str, out) -> int:
         if s is None:
             raise KeyError(doc_id)
 
-        ns = s["xml_namespace"]
-        attrs = s["root_attrs"] or {}
-        if isinstance(attrs, str):
-            attrs = json.loads(attrs)
-        root_attr = []
-        need_xsi = False
-        for k, v in attrs.items():
-            if k.startswith(f"{{{XSI}}}"):
-                need_xsi = True
-                k = "xsi:" + k.split("}", 1)[1]
-            root_attr.append(f" {k}={quoteattr(v)}")
-        nsdecl = (f' xmlns="{ns}"' if ns else "") + (f' xmlns:xsi="{XSI}"' if need_xsi else "")
+        cur.execute("SELECT * FROM nereus.effort WHERE set_id = %s", (s["id"],))
+        e = cur.fetchone()
 
-        out.write('<?xml version="1.0" encoding="UTF-8"?>\n')
-        out.write(f"<Detections{''.join(root_attr)}{nsdecl}>\n")
+        ns = s["xml_namespace"]
+        out.write(root_open("Detections", ns, s["root_attrs"]))
         out.write(_el("Id", s["doc_id"], 1))
         exact = s["exact_xml"] or {}
         blk = lambda name, col, depth, key=None: _block(name, s[col], exact.get(key or name), ns, depth)
         out.write(blk("Description", "description", 1))
         out.write(f"{IND}<DataSource>\n")
-        out.write(_opt("EnsembleId", s["ensemble_ref"], 2))
-        out.write(_opt("DeploymentId", s["deployment_ref"], 2))
+        out.write(_opt("EnsembleId", e["ensemble_ref"], 2))
+        out.write(_opt("DeploymentId", e["deployment_ref"], 2))
         out.write(f"{IND}</DataSource>\n")
         out.write(f"{IND}<Algorithm>\n")
         out.write(_opt("Method", s["algorithm_method"], 2))
@@ -210,7 +215,7 @@ def _export(conn: psycopg.Connection, doc_id: str, out) -> int:
         out.write(f"{IND}</Algorithm>\n")
         out.write(blk("QualityAssurance", "quality_assurance", 1))
         out.write(_opt("UserId", s["user_id"], 1))
-        out.write(_effort(cur, s))
+        out.write(_effort(cur, s, e))
         set_id = s["id"]
 
     n = 0

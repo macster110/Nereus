@@ -27,9 +27,6 @@ def conn():
         yield c
         c.execute("DELETE FROM nereus.detection_set WHERE doc_id LIKE 'TEST_%' "
                   "OR doc_id IN ('CSM01A_automatic_UBW_jst', 'SOCAL_U_01_automatic_UBW_jst')")
-        c.execute("DELETE FROM nereus.deployment d WHERE NOT EXISTS "
-                  "(SELECT 1 FROM nereus.detection_set s WHERE s.deployment_id = d.id) "
-                  "AND d.location IS NULL")
         c.commit()
 
 
@@ -112,10 +109,10 @@ def test_json_blocks_are_searchable(conn):
 def test_block_json_cannot_hold_keeps_original_xml(conn, tmp_path):
     """Text between child elements has no JSON form: the original XML is kept
     as well, and the export is still lossless."""
-    xml = KITCHEN.read_text().replace(
+    xml = KITCHEN.read_text(encoding="utf-8").replace(
         "<ClickTrainId>1234</ClickTrainId>", "<ClickTrainId>1234</ClickTrainId>stray text")
     src = tmp_path / "mixed.xml"
-    src.write_text(xml)
+    src.write_text(xml, encoding="utf-8")
     info, diffs = roundtrip(conn, src)
     assert diffs == []
     ud_json, ud_xml = conn.execute(
@@ -142,7 +139,7 @@ def test_summary_counts_minutes(conn):
 
 def test_unknown_element_rejected_and_rolled_back(conn):
     """An element the importer can't store must fail the whole import."""
-    xml = KITCHEN.read_text().replace("<Image>", "<Mystery>x</Mystery><Image>")
+    xml = KITCHEN.read_text(encoding="utf-8").replace("<Image>", "<Mystery>x</Mystery><Image>")
     with pytest.raises(UnmappedElement, match="Detection/Mystery"):
         ingest(conn, io.BytesIO(xml.encode()), replace=True)
     n = conn.execute("SELECT count(*) FROM nereus.detection_set "
@@ -158,7 +155,7 @@ def test_diff_detects_changes(conn, tmp_path):
     export(conn, "TEST_kitchen_sink", buf)
     changed = buf.getvalue().replace("<Score>0.93</Score>", "<Score>0.94</Score>")
     out = tmp_path / "changed.xml"
-    out.write_text(changed)
+    out.write_text(changed, encoding="utf-8")
     diffs = equivalent(KITCHEN, out)
     assert any("Score" in d for d in diffs)
 

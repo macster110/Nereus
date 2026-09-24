@@ -7,6 +7,9 @@
 # Sets up a Python environment and a local PostgreSQL cluster the first time,
 # then runs python -m compare.run. Any extra arguments are passed straight to
 # compare.run (e.g. -Extra "--questions","q4_effort" or "--skip-download").
+# With several -Extra values, run via -Command, not -File: -File passes
+# "a","b" through as one argument.
+#   powershell -ExecutionPolicy Bypass -Command "& .\compare\run_windows.ps1 -Extra @('--skip-download','--skip-build')"
 
 param(
     [string]$Tethys = "http://localhost:9779",

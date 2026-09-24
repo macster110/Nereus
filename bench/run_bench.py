@@ -67,10 +67,9 @@ DOWNLOAD_COLS = """
            d.t_start, d.t_end, d.channel, d.score, d.received_level_db, d.snr_db,
            d.min_freq_hz, d.max_freq_hz, d.duration_s
     FROM nereus.detection d
-    JOIN nereus.detection_set s ON s.id = d.set_id
-    JOIN (SELECT id, deployment_id, ST_Y(location::geometry) AS lat,
-                 ST_X(location::geometry) AS lon FROM nereus.deployment) dep
-      ON dep.id = s.deployment_id
+    JOIN (SELECT id, deployment_id, ST_Y(deploy_location::geometry) AS lat,
+                 ST_X(deploy_location::geometry) AS lon FROM nereus.deployment) dep
+      ON dep.id = d.deployment_id
 """
 
 
@@ -84,7 +83,19 @@ def main():
     with psycopg.connect(DSN) as conn:
         conn.execute("DELETE FROM nereus.detection_set WHERE doc_id LIKE 'SYN_%'")
         conn.execute("DELETE FROM nereus.deployment WHERE deployment_id LIKE 'SYN_%'")
+        conn.execute("DELETE FROM nereus.project WHERE name = 'SYNTHETIC'")
         conn.commit()
+
+        # Deployments first, so detections are linked to them as they load.
+        with conn.transaction():
+            pid = conn.execute("INSERT INTO nereus.project (name) VALUES ('SYNTHETIC') "
+                               "RETURNING id").fetchone()[0]
+            for i, (dep, v) in enumerate(deps.items()):
+                conn.execute(
+                    "INSERT INTO nereus.deployment (deployment_id, project_id, deployment_number, "
+                    "platform, deploy_lon, deploy_lat, t_deploy, t_recover) "
+                    "VALUES (%s, %s, %s, 'mooring', %s, %s, %s, %s)",
+                    (dep, pid, i + 1, v["lon"], v["lat"], v["start"], v["end"]))
 
         # ---------------------------------------------------------- ingest
         t = time.perf_counter()
@@ -92,14 +103,6 @@ def main():
         for f in files:
             n_det += ingest(conn, str(f))["detections"]
         res["ingest_s"] = time.perf_counter() - t
-        with conn.transaction():
-            for dep, v in deps.items():
-                conn.execute(
-                    "UPDATE nereus.deployment SET project = 'SYNTHETIC', "
-                    "location = ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, "
-                    "t_deploy = %s, t_recover = %s WHERE deployment_id = %s",
-                    (v["lon"], v["lat"], v["start"], v["end"], dep))
-        conn.commit()
         conn.autocommit = True
         conn.execute("VACUUM ANALYZE nereus.detection")
         conn.execute("VACUUM ANALYZE nereus.summary_daily")
@@ -118,20 +121,19 @@ def main():
         q["Q2 one species within 200 km of a point, one year"] = median_time(conn, """
             SELECT d.set_id, d.t_start, d.t_end, d.score
             FROM nereus.detection d
-            JOIN nereus.detection_set s ON s.id = d.set_id
-            JOIN nereus.deployment dep ON dep.id = s.deployment_id
+            JOIN nereus.deployment dep ON dep.id = d.deployment_id
             WHERE d.species_tsn = 180404
-              AND ST_DWithin(dep.location, ST_MakePoint(-20, 50)::geography, 200000)
+              AND ST_DWithin(dep.deploy_location, ST_MakePoint(-20, 50)::geography, 200000)
               AND d.t_start >= '2020-01-01' AND d.t_start < '2021-01-01'""")
         q["Q3 daily detection-positive minutes, all species, bounding box, one year (map layer)"] = median_time(conn, """
             SELECT m.deployment_id, m.species_tsn, m.day, m.dp_minutes, m.effort_minutes
             FROM nereus.summary_daily m
             JOIN nereus.deployment dep ON dep.id = m.deployment_id
-            WHERE dep.location && ST_MakeEnvelope(-30, 45, -10, 58, 4326)::geography
+            WHERE dep.deploy_location && ST_MakeEnvelope(-30, 45, -10, 58, 4326)::geography
               AND m.day >= '2020-01-01' AND m.day < '2021-01-01'""")
         q["Q4 hourly presence per deployment for one species (computed on the fly)"] = median_time(conn, """
-            SELECT s.deployment_id, date_trunc('hour', d.t_start) AS hour, count(*)
-            FROM nereus.detection d JOIN nereus.detection_set s ON s.id = d.set_id
+            SELECT d.deployment_id, date_trunc('hour', d.t_start) AS hour, count(*)
+            FROM nereus.detection d
             WHERE d.species_tsn = 180530
             GROUP BY 1, 2""")
         q["Q5 detections overlapping a 6-hour window, any species (range index)"] = median_time(conn, """

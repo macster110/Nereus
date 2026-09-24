@@ -44,9 +44,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from compare import workload  # noqa: E402
-from compare.queries import QUESTIONS, rows_from_xml, count_elements, sql_df  # noqa: E402
+from compare.queries import QUESTIONS, rows_from_xml, count_elements, sql_df, sql_result_bytes  # noqa: E402
 from compare.tethys import Tethys  # noqa: E402
-from nereus.deployment import parse_deployment, upsert_deployment  # noqa: E402
+from nereus.deployment import ingest_deployment  # noqa: E402
 from nereus.ingest import ingest, load_schema  # noqa: E402
 from nereus.writer import append_detections, close_detection_set, create_detection_set  # noqa: E402
 
@@ -103,7 +103,8 @@ def download_all(t: Tethys, cache: Path, res: dict, reuse: bool) -> None:
 def build_nereus(conn, cache: Path, res: dict, schema) -> None:
     """Import the downloaded Tethys documents: the one-off migration."""
     out = res.setdefault("build", {})
-    conn.execute("TRUNCATE nereus.detection_set, nereus.deployment RESTART IDENTITY CASCADE")
+    conn.execute("TRUNCATE nereus.detection_set, nereus.deployment, nereus.project, "
+                 "nereus.instrument, nereus.sensor RESTART IDENTITY CASCADE")
     conn.commit()
 
     tt = time.perf_counter()
@@ -111,8 +112,7 @@ def build_nereus(conn, cache: Path, res: dict, schema) -> None:
     files = sorted((cache / "Deployments").glob("*.xml"))
     for f in files:
         try:
-            with conn.transaction():
-                upsert_deployment(conn, parse_deployment(str(f)))
+            ingest_deployment(conn, str(f), replace=True)
         except Exception as e:
             dep_failed[f.name] = str(e)[:500]
     out["deployments"] = {"files": len(files), "seconds": time.perf_counter() - tt,
@@ -133,7 +133,7 @@ def build_nereus(conn, cache: Path, res: dict, schema) -> None:
             log(f"  Nereus import: {i}/{len(files)} documents, {n_det:,} detections")
     secs = time.perf_counter() - tt
     conn.autocommit = True
-    for tbl in ("detection", "detection_set", "effort_kind", "deployment", "summary_daily"):
+    for tbl in ("detection", "detection_set", "effort", "effort_kind", "deployment", "summary_daily"):
         conn.execute(f"VACUUM ANALYZE nereus.{tbl}")
     conn.autocommit = False
     out["detections"] = {"files": len(files), "bytes": total_bytes, "detections": n_det,
@@ -165,19 +165,19 @@ def choose_parameters(conn) -> dict:
     p["tsn_rare"], p["tsn_rare_count"] = rare
     p["month_start_rare"], p["month_end_rare"] = busiest_month(p["tsn_rare"])
 
-    dep = q("""SELECT s.deployment_ref, count(*) FROM nereus.detection d
-               JOIN nereus.detection_set s ON s.id = d.set_id
-               WHERE d.on_effort AND s.deployment_ref IS NOT NULL
+    dep = q("""SELECT e.deployment_ref, count(*) FROM nereus.detection d
+               JOIN nereus.effort e ON e.set_id = d.set_id
+               WHERE d.on_effort AND e.deployment_ref IS NOT NULL
                GROUP BY 1 ORDER BY 2 DESC LIMIT 1""")
     p["deployment"] = dep[0] if dep else None
 
     # Spatial: the positioned deployment with most detections of the species,
     # a 2 x 2 degree box around it, and the calendar year of its detections.
-    sp = q("""SELECT ST_Y(dep.location::geometry), ST_X(dep.location::geometry),
+    sp = q("""SELECT ST_Y(dep.deploy_location::geometry), ST_X(dep.deploy_location::geometry),
                      date_trunc('year', min(d.t_start), 'UTC')
-              FROM nereus.detection d JOIN nereus.detection_set s ON s.id = d.set_id
-              JOIN nereus.deployment dep ON dep.id = s.deployment_id
-              WHERE d.on_effort AND d.species_tsn = %s AND dep.location IS NOT NULL
+              FROM nereus.detection d
+              JOIN nereus.deployment dep ON dep.id = d.deployment_id
+              WHERE d.on_effort AND d.species_tsn = %s AND dep.deploy_location IS NOT NULL
               GROUP BY dep.id ORDER BY count(*) DESC LIMIT 1""", p["tsn"])
     if sp:
         lat, lon, year = sp
@@ -244,7 +244,7 @@ def run_questions(conn, t: Tethys | None, p: dict, args, outdir: Path, res: dict
             nereus_run()  # warm-up, not timed
             m = measure(nereus_run, args.repeats, args.budget)
             df = m.pop("result")
-            r["nereus"] = {**m, "rows": len(df)}
+            r["nereus"] = {**m, "rows": len(df), "bytes": sql_result_bytes(conn, *sql_df.last)}
             if q.check_nereus:
                 r["nereus"]["check"] = float(pd.to_numeric(df[q.check_nereus]).sum())
             log(f"   Nereus SQL      {m['median'] * 1000:10,.1f} ms   {len(df):>10,} rows")
@@ -329,10 +329,11 @@ def extract_everything(conn, outdir: Path, res: dict) -> None:
     an R/MATLAB/Python user gets) and into a Parquet file (a bulk download).
     The Tethys equivalent is downloading every document, timed in BUILD."""
     out = res.setdefault("extract_all", {})
-    sql = """SELECT s.doc_id, s.deployment_ref, d.species_tsn, d.calls[1] AS call,
+    sql = """SELECT s.doc_id, e.deployment_ref, d.species_tsn, d.calls[1] AS call,
                     d.t_start, d.t_end, d.channel, d.score, d.received_level_db,
                     d.min_freq_hz, d.max_freq_hz, d.duration_s
-             FROM nereus.detection d JOIN nereus.detection_set s ON s.id = d.set_id"""
+             FROM nereus.detection d JOIN nereus.detection_set s ON s.id = d.set_id
+             JOIN nereus.effort e ON e.set_id = d.set_id"""
     tt = time.perf_counter()
     df = sql_df(conn, sql)
     conn.commit()
@@ -582,6 +583,12 @@ def fmt_s(x):
     return f"{x * 1000:,.0f} ms" if x < 10 else f"{x:,.1f} s"
 
 
+def fmt_bytes(n):
+    if n is None:
+        return "–"
+    return f"{n / 1e3:,.0f} kB" if n < 1e6 else f"{n / 1e6:,.1f} MB"
+
+
 def ratio(nereus, tethys):
     """'12× faster' / '1.4× slower': Nereus relative to Tethys."""
     if not nereus or not tethys:
@@ -651,17 +658,20 @@ def write_report(res: dict, outdir: Path) -> Path:
               f"Median of up to {env['repeats']} runs (fewer when a run exceeds the "
               f"{env['budget_s']:.0f} s budget). End to end: query, transfer, and a pandas "
               "DataFrame. Tethys's XQuery result cache was **off**; the cache-hit column is "
-              "a repeat with it on.", "",
-              "| Question | Rows | Nereus SQL | Tethys XQuery | Tethys R/MATLAB route | Tethys cache hit | SQL vs Tethys XQuery | Same answer |",
-              "|---|---:|---:|---:|---:|---:|---:|:--:|"]
+              "a repeat with it on. Data size is the result as it comes back: the rows "
+              "in PostgreSQL's text format for Nereus (what psycopg receives), the XML "
+              "response for Tethys.", "",
+              "| Question | Rows | Data size: Nereus / Tethys XML | Nereus SQL | Tethys XQuery | Tethys R/MATLAB route | Tethys cache hit | SQL vs Tethys XQuery | Same answer |",
+              "|---|---:|---:|---:|---:|---:|---:|---:|:--:|"]
         for key, r in res["questions"].items():
             if "skipped" in r:
-                L.append(f"| **{key}** {r['title']} | – | skipped: {r['skipped']} | | | | | |")
+                L.append(f"| **{key}** {r['title']} | – | | skipped: {r['skipped']} | | | | | |")
                 continue
             n, tx, tj = r.get("nereus", {}), r.get("tethys_xquery", {}), r.get("tethys_json", {})
             cell = lambda m: ("error" if "error" in m else fmt_s(m.get("median")))
             rows = f"{n['rows']:,}" if "rows" in n else "–"
-            L.append(f"| **{key}** {r['title']} | {rows} | {cell(n)} | {cell(tx)} | "
+            size = f"{fmt_bytes(n.get('bytes'))} / {fmt_bytes(tx.get('bytes'))}"
+            L.append(f"| **{key}** {r['title']} | {rows} | {size} | {cell(n)} | {cell(tx)} | "
                      f"{cell(tj) if tj else '–'} | {fmt_s(r.get('tethys_cache_hit_s'))} | "
                      f"{ratio(n.get('median'), tx.get('median'))} | "
                      f"{'✓' if r.get('parity') == 'match' else ('✗' if r.get('parity') else '–')} |")
@@ -815,6 +825,9 @@ def main(argv=None):
 
             if not args.skip_extract:
                 p = choose_parameters(conn)
+                if live:  # the R/MATLAB route names species in Latin
+                    names = live.latin_names([p["tsn"], p["tsn_rare"]])
+                    p["latin"], p["latin_rare"] = names.get(p["tsn"]), names.get(p["tsn_rare"])
                 res["parameters"] = p
                 log("Parameters: " + json.dumps(p, default=jdefault))
                 run_questions(conn, live, p, args, outdir, res)

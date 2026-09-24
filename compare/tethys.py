@@ -97,6 +97,18 @@ class Tethys:
         plan=2 returns the XQuery Tethys generates instead of running it."""
         return self._post_xquery({"JSON": json.dumps(spec), "plan": str(plan)})
 
+    def latin_names(self, tsns: list[int]) -> dict[int, str]:
+        """ITIS TSN -> Latin completename, from Tethys's own ITIS tables."""
+        names = {}
+        for tsn in tsns:
+            xml = self._post_xquery({"XQuery":
+                'import module namespace lib="http://tethys.sdsu.edu/XQueryFns" at "Tethys.xq";\n'
+                + PROLOG + f'<r>{{lib:tsn2completename(<SpeciesId>{int(tsn)}</SpeciesId>)/text()}}</r>'})
+            m = re.search(rb"<r[^>]*>([^<]+)</r>", xml)
+            if m:
+                names[tsn] = m.group(1).decode().strip()
+        return names
+
     # -------------------------------------------------------------- uploading
     def import_xml(self, collection: str, path: Path, overwrite: bool = True) -> str:
         """Upload one XML document through /<collection>/import, the route the

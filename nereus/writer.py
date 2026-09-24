@@ -26,9 +26,12 @@ from typing import Iterable
 import psycopg
 from psycopg.types.json import Jsonb
 
+from .ingest import Source
 from .xmljson import from_python
 
-# Columns a writer may fill; anything not given is NULL.
+# Columns a writer may fill; anything not given is NULL. A detection may
+# also give "kind": the index of the Kind (in create_detection_set's kinds)
+# it answers; without it, the Kind is matched on species and call.
 DETECTION_FIELDS = [
     "t_start", "t_end", "input_file", "count", "event", "unit_id", "channel",
     "species_tsn", "species_group", "calls", "subtype", "score", "confidence",
@@ -43,7 +46,8 @@ _PARAM_FIELDS = {"subtype", "score", "confidence", "qa", "received_level_db",
                  "tonal_offset_s", "tonal_hz", "tonal_db", "event_ref", "user_defined"}
 _ARRAY_FIELDS = {"freq_measurements_db", "peaks_hz", "sideband_hz",
                  "tonal_offset_s", "tonal_hz", "tonal_db"}
-_COLS = ["set_id", "ord", "on_effort", *DETECTION_FIELDS, "has_parameters", "has_tonal"]
+_COLS = ["set_id", "ord", "kind_ord", "deployment_id", "on_effort", *DETECTION_FIELDS,
+         "has_parameters", "has_tonal"]
 
 
 @dataclass
@@ -86,6 +90,9 @@ def create_detection_set(conn: psycopg.Connection, doc_id: str, *, deployment: s
                          replace: bool = False) -> int:
     """Create the equivalent of a Detections document header. Returns set_id.
 
+    `deployment` is the Deployment Id. It need not be imported yet: the
+    detections are linked to it whenever it arrives.
+
     algorithm_parameters, description and metadata_info are plain dicts,
     stored as searchable jsonb, e.g.
         algorithm_parameters={"Threshold": {"@units": "dB", "#text": 12},
@@ -96,24 +103,20 @@ def create_detection_set(conn: psycopg.Connection, doc_id: str, *, deployment: s
     with conn.transaction():
         if replace:
             conn.execute("DELETE FROM nereus.detection_set WHERE doc_id = %s", (doc_id,))
-        dep_id = None
-        if deployment:
-            dep_id = conn.execute(
-                "INSERT INTO nereus.deployment (deployment_id) VALUES (%s) "
-                "ON CONFLICT (deployment_id) DO UPDATE SET deployment_id = EXCLUDED.deployment_id "
-                "RETURNING id", (deployment,)).fetchone()[0]
         set_id = conn.execute("""
             INSERT INTO nereus.detection_set
-                (doc_id, xml_namespace, deployment_ref, deployment_id, user_id,
-                 algorithm_method, algorithm_software, algorithm_version,
-                 algorithm_parameters, description, metadata_info, effort_start, effort_end)
-            VALUES (%s, 'http://tethys.sdsu.edu/schema/1.0', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (doc_id, xml_namespace, user_id, algorithm_method, algorithm_software,
+                 algorithm_version, algorithm_parameters, description, metadata_info)
+            VALUES (%s, 'http://tethys.sdsu.edu/schema/1.0', %s, %s, %s, %s, %s, %s, %s)
             RETURNING id""",
-            (doc_id, deployment, dep_id, user_id, method, software, version,
+            (doc_id, user_id, method, software, version,
              # "" exports as an empty <Parameters/>, which the schema expects
              Jsonb(from_python(algorithm_parameters) if algorithm_parameters else ""),
-             as_json(description), as_json(metadata_info),
-             effort_start, effort_end)).fetchone()[0]
+             as_json(description), as_json(metadata_info))).fetchone()[0]
+        conn.execute("""
+            INSERT INTO nereus.effort (set_id, deployment_ref, deployment_id, t_start, t_end)
+            VALUES (%s, %s, (SELECT id FROM nereus.deployment WHERE deployment_id = %s), %s, %s)""",
+            (set_id, deployment, deployment, effort_start, effort_end))
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO nereus.effort_kind (set_id, ord, species_tsn, species_group, call, "
@@ -123,7 +126,7 @@ def create_detection_set(conn: psycopg.Connection, doc_id: str, *, deployment: s
     return set_id
 
 
-def _row(set_id: int, ord_: int, d: dict, on_effort: bool) -> tuple:
+def _row(set_id: int, ord_: int, d: dict, on_effort: bool, src: Source) -> tuple:
     vals = []
     for f in DETECTION_FIELDS:
         v = d.get(f)
@@ -136,7 +139,11 @@ def _row(set_id: int, ord_: int, d: dict, on_effort: bool) -> tuple:
         vals.append(v)
     has_params = any(d.get(f) is not None for f in _PARAM_FIELDS)
     has_tonal = d.get("tonal_hz") is not None
-    return (set_id, ord_, on_effort, *vals, has_params, has_tonal)
+    calls = [d["calls"]] if isinstance(d.get("calls"), str) else d.get("calls")
+    kind = d["kind"] if "kind" in d else src.kind(d["species_tsn"], d.get("species_group"),
+                                                   calls, d.get("subtype"))
+    return (set_id, ord_, kind, src.deployment(d.get("unit_id")), on_effort,
+            *vals, has_params, has_tonal)
 
 
 def append_detections(conn: psycopg.Connection, set_id: int, detections: Iterable[dict],
@@ -155,7 +162,9 @@ def append_detections(conn: psycopg.Connection, set_id: int, detections: Iterabl
         # Uses the (set_id, ord) primary key: one index probe, however big the set.
         start = conn.execute("SELECT coalesce(max(ord) + 1, 0) FROM nereus.detection "
                              "WHERE set_id = %s", (set_id,)).fetchone()[0]
-        rows = [_row(set_id, start + i, d, on_effort) for i, d in enumerate(detections)]
+        with conn.cursor() as cur:
+            src = Source.of_set(cur, set_id)
+        rows = [_row(set_id, start + i, d, on_effort, src) for i, d in enumerate(detections)]
         if method == "copy":
             with conn.cursor() as cur, cur.copy(
                     f"COPY nereus.detection ({', '.join(_COLS)}) FROM STDIN") as cp:
@@ -176,6 +185,6 @@ def close_detection_set(conn: psycopg.Connection, set_id: int,
     """Optionally extend the effort end, and rebuild the daily summaries."""
     with conn.transaction():
         if effort_end is not None:
-            conn.execute("UPDATE nereus.detection_set SET effort_end = %s WHERE id = %s",
+            conn.execute("UPDATE nereus.effort SET t_end = %s WHERE set_id = %s",
                          (effort_end, set_id))
         conn.execute("SELECT nereus.refresh_summary(%s)", (set_id,))
